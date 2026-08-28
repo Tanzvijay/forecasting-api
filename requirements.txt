@@ -1,0 +1,8 @@
+fastapi==0.116.1
+uvicorn==0.35.0
+python-dotenv==1.1.1
+SQLAlchemy==2.0.43
+numpy==2.3.2
+pandas==2.3.2
+statsmodels==0.14.5
+scikit-learn==1.7.1
