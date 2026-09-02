@@ -4,6 +4,7 @@ from fastapi import (
     FastAPI,
     Depends,
     Query,
+    HTTPException
 )
 
 from sqlalchemy.orm import Session
@@ -108,21 +109,86 @@ def get_unique_values(
 # GET FILTERED TABLE
 # ============================================================
 
+# ================================================================
+# ROUTE
+# ================================================================
+
+# ================================================================
+# ROUTE
+# ================================================================
+
 @app.get("/tables/{table_name}")
 def get_table_data(
     table_name: str,
     filter_column: Optional[str] = None,
     filter_value: Optional[str] = None,
+    use_date_column: bool = False,
     selected_columns: Optional[str] = None,
+    date_column: Optional[str] = None,
+    target_column: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    return get_table_data_data(
+    if not use_date_column:
+
+        if not selected_columns:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": (
+                        "Please provide 'selected_columns'."
+                    ),
+                    "use_date_column": use_date_column,
+                },
+            )
+
+        resolved_selected_columns = selected_columns
+        resolved_date_column      = None
+        resolved_target_column    = None
+
+    else:
+
+        if not date_column:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": (
+                        "use_date_column is True "
+                        "but 'date_column' was not provided."
+                    ),
+                    "use_date_column": use_date_column,
+                },
+            )
+
+        if not target_column:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": (
+                        "use_date_column is True "
+                        "but 'target_column' was not provided."
+                    ),
+                    "use_date_column": use_date_column,
+                },
+            )
+
+        resolved_selected_columns = None
+        resolved_date_column      = date_column
+        resolved_target_column    = target_column
+
+    return get_table_data_data(   # ← return is REQUIRED
         table_name,
         filter_column,
         filter_value,
-        selected_columns,
+        use_date_column,
+        resolved_selected_columns,
+        resolved_date_column,
+        resolved_target_column,
         db,
     )
+
+# ================================================================
+# FUNCTION
+# ================================================================
 
 
 # ============================================================

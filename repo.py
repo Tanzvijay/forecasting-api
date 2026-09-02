@@ -179,7 +179,10 @@ def get_table_data_data(
     table_name: str,
     filter_column: Optional[str],
     filter_value: Optional[str],
-    selected_columns: Optional[str],
+    use_date_column: bool,
+    selected_columns: Optional[str],   # None when use_date_column=True
+    date_column: Optional[str],        # None when use_date_column=False
+    target_column: Optional[str],      # None when use_date_column=False
     db: Session,
 ):
     global latest_filtered_df
@@ -237,155 +240,212 @@ def get_table_data_data(
                 ].copy()
 
         # ========================================================
-        # SELECT COLUMNS
+        # BRANCH — use_date_column=False → HARDCODED tally columns
+        #          use_date_column=True  → user input columns
         # ========================================================
 
-        if selected_columns is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Please provide selected_columns.",
-            )
+        if not use_date_column:
 
-        cols = [
-            col.strip()
-            for col in selected_columns.split(",")
-            if col.strip()
-        ]
+            # ====================================================
+            # HARDCODED TALLY COLUMNS
+            # ====================================================
 
-        # ========================================================
-        # REQUIRE EXACTLY 3 COLUMNS
-        # ========================================================
+            TALLY_ID_COL     = "GUID"
+            TALLY_DATE_COL   = "Date"
+            TALLY_AMOUNT_COL = "Amount"
 
-        if len(cols) != 3:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "message": (
-                        "Exactly 3 columns are required."
-                    ),
-                    "selected_columns": cols,
-                },
-            )
-
-        # ========================================================
-        # CHECK SELECTED COLUMNS
-        # ========================================================
-
-        invalid_columns = [
-            col
-            for col in cols
-            if col not in df.columns
-        ]
-
-        if invalid_columns:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "message": (
-                        "Selected column(s) not found."
-                    ),
-                    "invalid_columns": invalid_columns,
-                },
-            )
-
-        # ========================================================
-        # CREATE SELECTED DATAFRAME
-        # ========================================================
-
-        selected_df = df[cols].copy()
-
-        # ========================================================
-        # REQUIRED COLUMNS
-        # ========================================================
-
-        required_columns = [
-            "GUID",
-            "Date",
-            "Amount",
-        ]
-
-        missing_required = [
-            col
-            for col in required_columns
-            if col not in selected_df.columns
-        ]
-
-        if missing_required:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "message": (
-                        "The selected 3 columns "
-                        "must contain GUID, Date "
-                        "and Amount."
-                    ),
-                    "missing_columns": missing_required,
-                    "selected_columns": cols,
-                },
-            )
-
-        # ========================================================
-        # PREPARE DATA
-        # ========================================================
-
-        selected_df["Date"] = pd.to_datetime(
-            selected_df["Date"],
-            errors="coerce",
-        )
-
-        selected_df["Amount"] = pd.to_numeric(
-            selected_df["Amount"],
-            errors="coerce",
-        )
-
-        selected_df = selected_df.dropna(
-            subset=[
-                "GUID",
-                "Date",
-                "Amount",
+            cols = [
+                TALLY_ID_COL,
+                TALLY_DATE_COL,
+                TALLY_AMOUNT_COL,
             ]
-        )
 
-        # ========================================================
-        # CHECK EMPTY RESULT
-        # ========================================================
+            # ====================================================
+            # CHECK HARDCODED COLUMNS EXIST IN TABLE
+            # ====================================================
 
-        if selected_df.empty:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "message": (
-                        "No rows found for the "
-                        "specified filter."
-                    ),
-                    "filter_column": filter_column,
-                    "filter_value": filter_value,
-                },
+            missing_columns = [
+                col
+                for col in cols
+                if col not in df.columns
+            ]
+
+            if missing_columns:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": (
+                            "Table does not have the "
+                            "required tally columns: "
+                            "GUID, Date, Amount."
+                        ),
+                        "missing_columns": missing_columns,
+                        "available_columns": (
+                            df.columns.tolist()
+                        ),
+                    },
+                )
+
+            # ====================================================
+            # CREATE SELECTED DATAFRAME
+            # ====================================================
+
+            selected_df = df[cols].copy()
+
+            # ====================================================
+            # PREPARE DATA
+            # ====================================================
+
+            selected_df[TALLY_DATE_COL] = pd.to_datetime(
+                selected_df[TALLY_DATE_COL],
+                errors="coerce",
             )
 
-        # ========================================================
-        # GUID + DATE + POSITIVE AMOUNT SUMMARY
-        # ========================================================
-
-        guid_positive_summary = (
-            selected_df
-            .assign(
-                Amount=selected_df["Amount"].abs()
+            selected_df[TALLY_AMOUNT_COL] = pd.to_numeric(
+                selected_df[TALLY_AMOUNT_COL],
+                errors="coerce",
             )
-            .groupby(
-                ["GUID", "Date"],
-                as_index=False,
-            )["Amount"]
-            .sum()
-        )
 
-        # ========================================================
-        # SAVE LATEST FILTERED DATA
-        # ========================================================
+            selected_df = selected_df.dropna(
+                subset=cols
+            )
 
-        latest_filtered_df = (
-            guid_positive_summary.copy()
-        )
+            # ====================================================
+            # CHECK EMPTY RESULT
+            # ====================================================
+
+            if selected_df.empty:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "message": (
+                            "No rows found for the "
+                            "specified filter."
+                        ),
+                        "filter_column": filter_column,
+                        "filter_value":  filter_value,
+                    },
+                )
+
+            # ====================================================
+            # GUID + Date + Amount SUMMARY
+            # ====================================================
+
+            guid_positive_summary = (
+                selected_df
+                .assign(
+                    Amount=selected_df[TALLY_AMOUNT_COL].abs()
+                )
+                .groupby(
+                    [TALLY_ID_COL, TALLY_DATE_COL],
+                    as_index=False,
+                )[TALLY_AMOUNT_COL]
+                .sum()
+            )
+
+            latest_filtered_df = guid_positive_summary.copy()
+
+            response_extra = {
+                "selected_columns": cols,   # ["GUID", "Date", "Amount"]
+            }
+
+        else:
+
+            # ====================================================
+            # CHECK date_column + target_column EXIST IN TABLE
+            # ====================================================
+
+            if date_column not in df.columns:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": (
+                            f"date_column '{date_column}' "
+                            f"not found in table '{table_name}'."
+                        ),
+                        "available_columns": (
+                            df.columns.tolist()
+                        ),
+                    },
+                )
+
+            if target_column not in df.columns:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": (
+                            f"target_column '{target_column}' "
+                            f"not found in table '{table_name}'."
+                        ),
+                        "available_columns": (
+                            df.columns.tolist()
+                        ),
+                    },
+                )
+
+            # ====================================================
+            # BUILD DATAFRAME FROM date_column + target_column
+            # ====================================================
+
+            selected_df = df[
+                [date_column, target_column]
+            ].copy()
+
+            selected_df[date_column] = pd.to_datetime(
+                selected_df[date_column],
+                errors="coerce",
+            )
+
+            selected_df[target_column] = pd.to_numeric(
+                selected_df[target_column],
+                errors="coerce",
+            )
+
+            selected_df = selected_df.dropna(
+                subset=[date_column, target_column]
+            )
+
+            # ====================================================
+            # CHECK EMPTY RESULT
+            # ====================================================
+
+            if selected_df.empty:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "message": (
+                            "No rows found for the "
+                            "specified filter."
+                        ),
+                        "filter_column": filter_column,
+                        "filter_value":  filter_value,
+                    },
+                )
+
+            # ====================================================
+            # date_column + target_column SUMMARY
+            # ====================================================
+
+            guid_positive_summary = (
+                selected_df
+                .assign(**{
+                    target_column: (
+                        selected_df[target_column].abs()
+                    )
+                })
+                .groupby(
+                    [date_column],
+                    as_index=False,
+                )[target_column]
+                .sum()
+            )
+
+            latest_filtered_df = guid_positive_summary.copy()
+
+            response_extra = {
+                "date_column":   date_column,
+                "target_column": target_column,
+            }
 
         # ========================================================
         # PREVIEW
@@ -407,12 +467,9 @@ def get_table_data_data(
         # ========================================================
 
         return {
-            "table_name": table_name,
-
-            "filter_column": filter_column,
-
-            "filter_value": filter_value,
-
+            "table_name":      table_name,
+            "filter_column":   filter_column,
+            "filter_value":    filter_value,
             "filter_values": (
                 [
                     value.strip()
@@ -422,26 +479,14 @@ def get_table_data_data(
                 if filter_value is not None
                 else []
             ),
-
-            "selected_columns": cols,
-
-            "rows": len(
-                latest_filtered_df
-            ),
-
-            "columns": (
-                latest_filtered_df
-                .columns
-                .tolist()
-            ),
-
-            "data": preview_df.to_dict(
-                orient="records"
-            ),
+            "use_date_column": use_date_column,
+            **response_extra,
+            "rows":    len(latest_filtered_df),
+            "columns": latest_filtered_df.columns.tolist(),
+            "data":    preview_df.to_dict(orient="records"),
         }
 
     except ValueError as e:
-
         raise HTTPException(
             status_code=404,
             detail=str(e),
@@ -451,12 +496,10 @@ def get_table_data_data(
         raise
 
     except Exception as e:
-
         raise HTTPException(
             status_code=500,
             detail=str(e),
         )
-
 
 
 

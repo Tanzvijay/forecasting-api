@@ -101,7 +101,7 @@ def create_monthly_series(df, DATE_COL, TARGET_COL):
 
     monthly_series = (
         df.set_index(DATE_COL)[TARGET_COL]
-        .resample("M")
+        .resample("ME")
         .sum()
     )
 
@@ -114,7 +114,7 @@ def create_monthly_series(df, DATE_COL, TARGET_COL):
 
     monthly_series = (
         monthly_series
-        .asfreq("M")
+        .asfreq("ME")
         .fillna(0)
     )
 
@@ -1249,13 +1249,10 @@ def forecast_model(series, horizon, season):
     )
 
 
-
-
 def generate_forecast_data(
     frequency: Literal["weekly", "monthly"],
     count: int,
 ):
-    
 
     # --------------------------------------------------------
     # CHECK FILTERED DATA
@@ -1274,30 +1271,84 @@ def generate_forecast_data(
         df = repo.latest_filtered_df.copy()
 
         # --------------------------------------------------------
-        # REQUIRED COLUMNS
+        # DETECT DATE COLUMN
         # --------------------------------------------------------
 
-        required_columns = [
-            "GUID",
-            "Date",
-            "Amount",
-        ]
+        date_col = None
 
-        missing_columns = [
-            col
-            for col in required_columns
-            if col not in df.columns
-        ]
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                date_col = col
+                break
 
-        if missing_columns:
+        if date_col is None:
+            for col in df.columns:
+                try:
+                    parsed = pd.to_datetime(
+                        df[col],
+                        errors="coerce",
+                    )
+                    if parsed.notna().sum() > 0:
+                        df[col] = parsed
+                        date_col = col
+                        break
+                except Exception:
+                    continue
+
+        if date_col is None:
             raise HTTPException(
                 status_code=400,
                 detail={
                     "message": (
-                        "Filtered data must contain "
-                        "GUID, Date and Amount."
+                        "No date column found "
+                        "in filtered data."
                     ),
-                    "missing_columns": missing_columns,
+                    "available_columns": (
+                        df.columns.tolist()
+                    ),
+                },
+            )
+
+        # --------------------------------------------------------
+        # DETECT TARGET COLUMN
+        # --------------------------------------------------------
+
+        target_col = None
+
+        for col in df.columns:
+            if col == date_col:
+                continue
+            if pd.api.types.is_numeric_dtype(df[col]):
+                target_col = col
+                break
+
+        if target_col is None:
+            for col in df.columns:
+                if col == date_col:
+                    continue
+                try:
+                    parsed = pd.to_numeric(
+                        df[col],
+                        errors="coerce",
+                    )
+                    if parsed.notna().sum() > 0:
+                        df[col] = parsed
+                        target_col = col
+                        break
+                except Exception:
+                    continue
+
+        if target_col is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": (
+                        "No numeric target column found "
+                        "in filtered data."
+                    ),
+                    "available_columns": (
+                        df.columns.tolist()
+                    ),
                 },
             )
 
@@ -1305,22 +1356,18 @@ def generate_forecast_data(
         # CLEAN DATA
         # --------------------------------------------------------
 
-        df["Date"] = pd.to_datetime(
-            df["Date"],
+        df[date_col] = pd.to_datetime(
+            df[date_col],
             errors="coerce",
         )
 
-        df["Amount"] = pd.to_numeric(
-            df["Amount"],
+        df[target_col] = pd.to_numeric(
+            df[target_col],
             errors="coerce",
         )
 
         df = df.dropna(
-            subset=[
-                "GUID",
-                "Date",
-                "Amount",
-            ]
+            subset=[date_col, target_col]
         )
 
         if df.empty:
@@ -1339,16 +1386,16 @@ def generate_forecast_data(
         if frequency == "weekly":
             series = create_weekly_series(
                 df,
-                "Date",
-                "Amount",
+                date_col,
+                target_col,
             )
             season = 52
 
         else:
             series = create_monthly_series(
                 df,
-                "Date",
-                "Amount",
+                date_col,
+                target_col,
             )
             season = 12
 
@@ -1384,7 +1431,6 @@ def generate_forecast_data(
         # --------------------------------------------------------
 
         if frequency == "weekly":
-
             future_dates = pd.date_range(
                 start=(
                     series.index[-1]
@@ -1395,18 +1441,38 @@ def generate_forecast_data(
             )
 
         else:
-
             future_dates = pd.date_range(
                 start=(
                     series.index[-1]
                     + pd.offsets.MonthEnd(1)
                 ),
                 periods=count,
-                freq="M",
+                freq="ME",
             )
 
         # --------------------------------------------------------
-        # CREATE RESPONSE
+        # BUILD HISTORICAL RECORDS
+        # --------------------------------------------------------
+
+        historical_records = [
+            {
+                "Date": date.strftime("%Y-%m-%d"),
+                "Actual": (
+                    round(float(val), 2)
+                    if np.isfinite(val)
+                    else None           # ← nan → None
+                ),
+                "Forecast": None,
+                "Type": "historical",
+            }
+            for date, val in zip(
+                series.index,
+                series.values,
+            )
+        ]
+
+        # --------------------------------------------------------
+        # BUILD FORECAST RECORDS
         # --------------------------------------------------------
 
         forecast_values = np.asarray(
@@ -1414,29 +1480,41 @@ def generate_forecast_data(
             dtype=float,
         )
 
-        result = pd.DataFrame({
-            "Date": future_dates,
-            "Forecast": forecast_values,
-        })
+        forecast_records = [
+            {
+                "Date": date.strftime("%Y-%m-%d"),
+                "Actual": None,
+                "Forecast": (
+                    round(float(val), 2)
+                    if np.isfinite(val)
+                    else None           # ← nan/inf → None
+                ),
+                "Type": "forecast",
+            }
+            for date, val in zip(
+                future_dates,
+                forecast_values,
+            )
+        ]
 
-        result["Date"] = (
-            result["Date"]
-            .dt.strftime("%Y-%m-%d")
-        )
+        # --------------------------------------------------------
+        # COMBINE HISTORICAL + FORECAST
+        # --------------------------------------------------------
 
-        result["Forecast"] = (
-            result["Forecast"]
-            .round(2)
-        )
+        combined = historical_records + forecast_records
+
+        # --------------------------------------------------------
+        # RESPONSE
+        # --------------------------------------------------------
 
         return {
-            "frequency": frequency,
-            "forecast_count": count,
+            "frequency":               frequency,
+            "forecast_count":          count,
+            "date_column_used":        date_col,
+            "target_column_used":      target_col,
             "historical_observations": len(series),
-            "season": season,
-            "data": result.to_dict(
-                orient="records"
-            ),
+            "season":                  season,
+            "data":                    combined,
         }
 
     except HTTPException:
@@ -1447,3 +1525,5 @@ def generate_forecast_data(
             status_code=500,
             detail=str(e),
         )
+
+
