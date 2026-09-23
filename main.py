@@ -6,7 +6,9 @@ from fastapi import (
     Query,
     HTTPException
 )
-
+from fastapi import UploadFile, File
+from pathlib import Path
+import re
 from sqlalchemy.orm import Session
 
 import repo
@@ -23,6 +25,7 @@ from model_test import (
     build_model_diagnostics_data,
 )
 
+
 from repo import (
     get_db,
     get_tables,
@@ -30,6 +33,7 @@ from repo import (
     get_unique_values_data,
     get_table_data_data,
     get_latest_filtered_data_data,
+
 )
 
 
@@ -59,10 +63,28 @@ def health():
         "status": "healthy"
     }
 
-
+@app.post("/upload-file/")
+def upload_file(
+    file: UploadFile = File(...),
+    table_name: str = Query(...)
+):
+    return repo.upload_file_to_database(
+        file=file,
+        table_name=table_name
+    )
 # ============================================================
 # GET TABLES
 # ============================================================
+@app.post("/upload-file/")
+def upload_file(
+    file: UploadFile = File(...),
+    table_name: str = Query(...)
+):
+    return repo.upload_file_to_database(
+        file=file,
+        table_name=table_name
+    )
+
 
 @app.get("/tables")
 def db_details(

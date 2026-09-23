@@ -10,10 +10,95 @@ from fastapi import (
     HTTPException,
     Query,
 )
+from fastapi import UploadFile, File
+from pathlib import Path
+import re
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
+def upload_file_to_database(
+    file: UploadFile,
+    table_name: str,
+):
+    try:
+        # -----------------------------------------
+        # Validate file extension
+        # -----------------------------------------
+        file_extension = Path(file.filename).suffix.lower()
 
+        if file_extension not in [".csv", ".xlsx", ".xls"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Only CSV, XLSX and XLS files are supported."
+            )
+
+        # -----------------------------------------
+        # Validate table name
+        # -----------------------------------------
+        if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table_name):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid table name."
+            )
+
+        # -----------------------------------------
+        # Read uploaded file
+        # -----------------------------------------
+        if file_extension == ".csv":
+
+            df = pd.read_csv(file.file)
+
+        else:
+
+            df = pd.read_excel(file.file)
+
+        # -----------------------------------------
+        # Check empty file
+        # -----------------------------------------
+        if df.empty:
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded file is empty."
+            )
+
+        # -----------------------------------------
+        # Clean column names
+        # -----------------------------------------
+        df.columns = [
+            str(col).strip()
+            .replace(" ", "_")
+            .replace("-", "_")
+            for col in df.columns
+        ]
+
+        # -----------------------------------------
+        # Save dataframe to PostgreSQL
+        # -----------------------------------------
+        df.to_sql(
+            table_name,
+            con=engine,
+            if_exists="replace",
+            index=False,
+            method="multi"
+        )
+
+        return {
+            "message": "File uploaded successfully.",
+            "file_name": file.filename,
+            "table_name": table_name,
+            "rows": len(df),
+            "columns": df.columns.tolist()
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 load_dotenv()
 
