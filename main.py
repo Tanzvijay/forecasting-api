@@ -16,14 +16,12 @@ import repo
 from auth import require_api_key
 
 from Models import (
-    MODELS,
-    N_ROLLING_WINDOWS,
-    generate_forecast_data,
+   
+    prepare_forecast_df,
+    generate_forecast_output,
+    
 )
 
-from model_test import (
-    build_model_diagnostics_data,
-)
 
 
 from repo import (
@@ -32,7 +30,8 @@ from repo import (
     get_table_columns_data,
     get_unique_values_data,
     get_table_data_data,
-    get_latest_filtered_data_data,
+    get_latest_filtered_data_data
+    
 
 )
 
@@ -226,57 +225,6 @@ def get_latest_filtered_data():
 # AVAILABLE FORECASTING MODELS
 # ============================================================
 
-@app.get("/models")
-def available_models():
-    return {
-        "models": MODELS,
-
-        "removed_models": [
-            "XGBoost",
-            "CatBoost",
-        ],
-
-        "diagnostics_available": True,
-    }
-
-
-# ============================================================
-# MODEL DIAGNOSTICS
-# ============================================================
-
-@app.get("/model-diagnostics")
-def model_diagnostics(
-    frequency: Literal["weekly", "monthly"] = Query(
-        ...,
-        description=(
-            "Diagnostic frequency: weekly or monthly"
-        ),
-    ),
-
-    test_size: Optional[int] = Query(
-        None,
-        ge=1,
-        description=(
-            "Validation periods per rolling window. "
-            "If omitted, selected automatically."
-        ),
-    ),
-
-    n_windows: int = Query(
-        N_ROLLING_WINDOWS,
-        ge=2,
-        le=10,
-        description=(
-            "Number of time-series rolling validation windows."
-        ),
-    ),
-):
-    return build_model_diagnostics_data(
-        df=repo.latest_filtered_df,
-        frequency=frequency,
-        test_size=test_size,
-        n_windows=n_windows,
-    )
 
 
 # ============================================================
@@ -285,22 +233,60 @@ def model_diagnostics(
 
 @app.get("/forecast")
 def generate_forecast(
-    frequency: Literal["weekly", "monthly"] = Query(
-        ...,
-        description=(
-            "Forecast frequency: weekly or monthly"
-        ),
-    ),
-
-    count: int = Query(
-        ...,
-        ge=1,
-        description=(
-            "Number of future periods to forecast"
-        ),
-    ),
+    frequency: Literal["raw", "weekly", "monthly"] = Query(...),
+    count: int = Query(..., ge=1),
 ):
-    return generate_forecast_data(
-        frequency=frequency,
+    if repo.latest_filtered_df is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No filtered data available."
+        )
+
+    df = repo.latest_filtered_df.copy()
+
+    df = prepare_forecast_df(
+        df=df,
+        frequency=frequency
+    )
+
+    return generate_forecast_output(
+        df=df,
+        date_column="Date",
+        target_column="Amount",
+        frequency=frequency if frequency != "raw" else "monthly",
         count=count,
     )
+
+
+@app.get("/forecast-accuracy")
+def forecast_accuracy(
+    frequency: Literal["weekly", "monthly"] = Query(...)
+):
+
+    if repo.latest_filtered_df is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No filtered data available."
+        )
+
+    df = repo.latest_filtered_df.copy()
+
+    df = prepare_forecast_df(
+        df=df,
+        frequency=frequency
+    )
+
+    result = generate_forecast_output(
+        df=df,
+        date_column="Date",
+        target_column="Amount",
+        frequency=frequency,
+        count=1,
+        return_accuracy=True
+    )
+
+    return {
+        "frequency": frequency,
+        "accuracy": result["accuracy"],
+        "selected_model": result["selected_model"]
+    }
