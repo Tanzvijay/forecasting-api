@@ -6,7 +6,11 @@ from typing import Literal
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+)
 
 from fastapi import HTTPException
 
@@ -22,12 +26,18 @@ def prepare_forecast_df(
 
     df = df.copy()
 
+    # --------------------------------------------------------
+    # Convert Date
+    # --------------------------------------------------------
+
     df["Date"] = pd.to_datetime(
         df["Date"],
         errors="coerce"
     )
 
-    df = df.dropna(subset=["Date"])
+    df = df.dropna(
+        subset=["Date"]
+    )
 
     # --------------------------------------------------------
     # Raw
@@ -53,12 +63,17 @@ def prepare_forecast_df(
               .reset_index()
         )
 
+        # Make Amount positive
         if "Amount" in df.columns:
 
             df["Amount"] = (
                 df["Amount"]
                 .abs()
             )
+
+        # IMPORTANT:
+        # Do NOT remove zero weeks.
+        # Keeping them maintains a continuous time series.
 
     # --------------------------------------------------------
     # Monthly
@@ -73,12 +88,17 @@ def prepare_forecast_df(
               .reset_index()
         )
 
+        # Make Amount positive
         if "Amount" in df.columns:
 
             df["Amount"] = (
                 df["Amount"]
                 .abs()
             )
+
+    # --------------------------------------------------------
+    # Final sorting
+    # --------------------------------------------------------
 
     return (
         df.sort_values("Date")
@@ -104,49 +124,27 @@ def generate_forecast_output(
 
     df = df.copy()
 
-    # --------------------------------------------------------
-    # CHECK DATE COLUMN
-    # --------------------------------------------------------
-
     if date_column not in df.columns:
-
         raise HTTPException(
             status_code=400,
             detail=f"Date column '{date_column}' not found."
         )
 
-    # --------------------------------------------------------
-    # CHECK TARGET COLUMN
-    # --------------------------------------------------------
-
     if target_column not in df.columns:
-
         raise HTTPException(
             status_code=400,
             detail=f"Target column '{target_column}' not found."
         )
-
-    # --------------------------------------------------------
-    # CONVERT DATE
-    # --------------------------------------------------------
 
     df[date_column] = pd.to_datetime(
         df[date_column],
         errors="coerce"
     )
 
-    # --------------------------------------------------------
-    # CONVERT TARGET
-    # --------------------------------------------------------
-
     df[target_column] = pd.to_numeric(
         df[target_column],
         errors="coerce"
     )
-
-    # --------------------------------------------------------
-    # REMOVE INVALID VALUES
-    # --------------------------------------------------------
 
     df = df.dropna(
         subset=[
@@ -155,22 +153,12 @@ def generate_forecast_output(
         ]
     )
 
-    # --------------------------------------------------------
-    # MAKE TARGET POSITIVE
-    # --------------------------------------------------------
-
     df[target_column] = (
         df[target_column]
         .abs()
     )
 
-    # --------------------------------------------------------
-    # SORT
-    # --------------------------------------------------------
-
-    df = df.sort_values(
-        date_column
-    )
+    df = df.sort_values(date_column)
 
     # ========================================================
     # 2. AGGREGATE TIME SERIES
@@ -194,46 +182,26 @@ def generate_forecast_output(
               .to_frame()
         )
 
-    # ========================================================
-    # 3. CREATE TIME SERIES
-    # ========================================================
-
-    y = (
-        df[target_column]
-        .astype(float)
-    )
-
-    # ========================================================
-    # 4. CHECK DATA
-    # ========================================================
+    y = df[target_column].astype(float)
 
     if y.empty:
-
         raise HTTPException(
             status_code=400,
             detail="No valid data available for forecasting."
         )
 
     # ========================================================
-    # 5. VALIDATION SETTINGS
+    # 3. VALIDATION SETTINGS
     # ========================================================
 
     if frequency == "monthly":
-
         seasonal_period = 12
         initial_train_size = 24
-
     else:
-
         seasonal_period = 52
         initial_train_size = 104
 
-    # ========================================================
-    # 6. CHECK MINIMUM DATA
-    # ========================================================
-
     if len(y) <= initial_train_size:
-
         raise HTTPException(
             status_code=400,
             detail=(
@@ -245,7 +213,8 @@ def generate_forecast_output(
         )
 
     # ========================================================
-    # 7. WAPE FUNCTION
+    # 4. WAPE / ACCURACY
+    # Accuracy = 100 - WAPE
     # ========================================================
 
     def calculate_wape(actual, forecast):
@@ -270,7 +239,6 @@ def generate_forecast_output(
         forecast = forecast[valid]
 
         if len(actual) == 0:
-
             return np.inf
 
         denominator = np.sum(
@@ -278,28 +246,20 @@ def generate_forecast_output(
         )
 
         if denominator == 0:
-
             return np.inf
 
-        wape = (
-            np.sum(
-                np.abs(
-                    actual - forecast
+        return float(
+            (
+                np.sum(
+                    np.abs(
+                        actual - forecast
+                    )
                 )
-            )
-            / denominator
-        ) * 100
+                / denominator
+            ) * 100
+        )
 
-        return float(wape)
-
-    # ========================================================
-    # 8. ACCURACY FUNCTION
-    # ========================================================
-
-    def calculate_accuracy(
-        actual,
-        forecast
-    ):
+    def calculate_accuracy(actual, forecast):
 
         wape = calculate_wape(
             actual,
@@ -307,149 +267,84 @@ def generate_forecast_output(
         )
 
         if not np.isfinite(wape):
-
             return np.nan
 
-        accuracy = 100 - wape
-
-        # Prevent negative accuracy
-        accuracy = max(
-            0,
-            accuracy
+        return max(
+            0.0,
+            100.0 - wape
         )
 
-        return float(accuracy)
-
     # ========================================================
-    # 9. MODEL RESULT STORAGE
-    # ========================================================
-
-    model_results = {
-
-        "Seasonal Naive": {
-            "actual": [],
-            "forecast": []
-        },
-
-        "ETS": {
-            "actual": [],
-            "forecast": []
-        },
-
-        "SARIMA": {
-            "actual": [],
-            "forecast": []
-        },
-
-        "Random Forest": {
-            "actual": [],
-            "forecast": []
-        }
-    }
-
-    # ========================================================
-    # 10. WALK-FORWARD VALIDATION
+    # 5. WALK-FORWARD VALIDATION
     # ========================================================
 
     test = y.iloc[
         initial_train_size:
     ]
 
+    hw_history = y.iloc[
+        :initial_train_size
+    ].copy()
+
+    sarima_history = list(
+        y.iloc[
+            :initial_train_size
+        ].values
+    )
+
+    hw_actuals = []
+    hw_forecasts = []
+
+    sarima_actuals = []
+    sarima_forecasts = []
+
     for date, actual_value in test.items():
 
-        # ====================================================
-        # HISTORY
-        # ====================================================
-
-        history = y.loc[
-            :date
-        ].iloc[:-1]
-
-        # ====================================================
-        # SEASONAL NAIVE
-        # ====================================================
+        # ----------------------------------------------------
+        # HOLT-WINTERS
+        # ----------------------------------------------------
 
         try:
 
-            if len(history) >= seasonal_period:
-
-                naive_prediction = float(
-                    history.iloc[
-                        -seasonal_period
-                    ]
-                )
-
-            else:
-
-                naive_prediction = float(
-                    history.iloc[-1]
-                )
-
-        except Exception:
-
-            naive_prediction = np.nan
-
-        model_results[
-            "Seasonal Naive"
-        ]["actual"].append(
-            actual_value
-        )
-
-        model_results[
-            "Seasonal Naive"
-        ]["forecast"].append(
-            naive_prediction
-        )
-
-        # ====================================================
-        # ETS
-        # ====================================================
-
-        try:
-
-            ets_model = ExponentialSmoothing(
-                history,
+            hw_model = ExponentialSmoothing(
+                hw_history,
                 trend="add",
                 seasonal="add",
                 seasonal_periods=seasonal_period,
                 initialization_method="estimated"
             )
 
-            ets_fitted = ets_model.fit(
+            hw_fitted = hw_model.fit(
                 optimized=True,
                 use_brute=True
             )
 
-            ets_prediction = float(
-                ets_fitted.forecast(
-                    steps=1
-                ).iloc[0]
+            hw_prediction = float(
+                hw_fitted
+                .forecast(steps=1)
+                .iloc[0]
             )
 
         except Exception:
 
-            ets_prediction = np.nan
+            hw_prediction = np.nan
 
-        model_results[
-            "ETS"
-        ]["actual"].append(
+        hw_actuals.append(
             actual_value
         )
 
-        model_results[
-            "ETS"
-        ]["forecast"].append(
-            ets_prediction
+        hw_forecasts.append(
+            hw_prediction
         )
 
-        # ====================================================
+        # ----------------------------------------------------
         # SARIMA
-        # ====================================================
+        # ----------------------------------------------------
 
         try:
 
             sarima_model = SARIMAX(
-                history.values,
+                sarima_history,
                 order=(1, 1, 1),
                 seasonal_order=(
                     0,
@@ -466,179 +361,63 @@ def generate_forecast_output(
             )
 
             sarima_prediction = float(
-                sarima_fitted.forecast(
-                    steps=1
-                )[0]
+                sarima_fitted
+                .forecast(steps=1)[0]
             )
 
         except Exception:
 
             sarima_prediction = np.nan
 
-        model_results[
-            "SARIMA"
-        ]["actual"].append(
+        sarima_actuals.append(
             actual_value
         )
 
-        model_results[
-            "SARIMA"
-        ]["forecast"].append(
+        sarima_forecasts.append(
             sarima_prediction
         )
 
-        # ====================================================
-        # RANDOM FOREST
-        # ====================================================
+        # ----------------------------------------------------
+        # EXPANDING WINDOW
+        # ----------------------------------------------------
 
-        try:
+        hw_history.loc[date] = actual_value
 
-            rf_history = history.copy()
-
-            # Create lag features
-            rf_df = pd.DataFrame({
-                "y": rf_history.values
-            })
-
-            rf_df["lag_1"] = rf_df["y"].shift(1)
-            rf_df["lag_2"] = rf_df["y"].shift(2)
-            rf_df["lag_3"] = rf_df["y"].shift(3)
-
-            rf_df["rolling_mean_3"] = (
-                rf_df["y"]
-                .shift(1)
-                .rolling(3)
-                .mean()
-            )
-
-            rf_df = rf_df.dropna()
-
-            if len(rf_df) >= 10:
-
-                X = rf_df[
-                    [
-                        "lag_1",
-                        "lag_2",
-                        "lag_3",
-                        "rolling_mean_3"
-                    ]
-                ]
-
-                target = rf_df["y"]
-
-                rf_model = RandomForestRegressor(
-                    n_estimators=200,
-                    random_state=42,
-                    n_jobs=-1
-                )
-
-                rf_model.fit(
-                    X,
-                    target
-                )
-
-                last_values = rf_history.values
-
-                rf_input = pd.DataFrame({
-                    "lag_1": [
-                        last_values[-1]
-                    ],
-                    "lag_2": [
-                        last_values[-2]
-                    ],
-                    "lag_3": [
-                        last_values[-3]
-                    ],
-                    "rolling_mean_3": [
-                        np.mean(
-                            last_values[-3:]
-                        )
-                    ]
-                })
-
-                rf_prediction = float(
-                    rf_model.predict(
-                        rf_input
-                    )[0]
-                )
-
-            else:
-
-                rf_prediction = float(
-                    history.iloc[-1]
-                )
-
-        except Exception:
-
-            rf_prediction = np.nan
-
-        model_results[
-            "Random Forest"
-        ]["actual"].append(
+        sarima_history.append(
             actual_value
         )
 
-        model_results[
-            "Random Forest"
-        ]["forecast"].append(
-            rf_prediction
-        )
-
     # ========================================================
-    # 11. FINAL FORECASTS
+    # 6. CALCULATE EACH MODEL ACCURACY
     # ========================================================
 
-    future_forecasts = {}
+    hw_wape = calculate_wape(
+        hw_actuals,
+        hw_forecasts
+    )
+
+    hw_accuracy = calculate_accuracy(
+        hw_actuals,
+        hw_forecasts
+    )
+
+    sarima_wape = calculate_wape(
+        sarima_actuals,
+        sarima_forecasts
+    )
+
+    sarima_accuracy = calculate_accuracy(
+        sarima_actuals,
+        sarima_forecasts
+    )
 
     # ========================================================
-    # SEASONAL NAIVE
-    # ========================================================
-
-    try:
-
-        seasonal_naive_forecast = []
-
-        history_values = list(
-            y.values
-        )
-
-        for i in range(count):
-
-            if len(history_values) >= seasonal_period:
-
-                prediction = history_values[
-                    -seasonal_period
-                ]
-
-            else:
-
-                prediction = history_values[-1]
-
-            seasonal_naive_forecast.append(
-                float(prediction)
-            )
-
-            history_values.append(
-                prediction
-            )
-
-        future_forecasts[
-            "Seasonal Naive"
-        ] = seasonal_naive_forecast
-
-    except Exception:
-
-        future_forecasts[
-            "Seasonal Naive"
-        ] = [np.nan] * count
-
-    # ========================================================
-    # ETS
+    # 7. FINAL HOLT-WINTERS FORECAST
     # ========================================================
 
     try:
 
-        ets_model = ExponentialSmoothing(
+        final_hw_model = ExponentialSmoothing(
             y,
             trend="add",
             seasonal="add",
@@ -646,35 +425,28 @@ def generate_forecast_output(
             initialization_method="estimated"
         )
 
-        ets_fitted = ets_model.fit(
+        final_hw_fitted = final_hw_model.fit(
             optimized=True,
             use_brute=True
         )
 
-        ets_forecast = ets_fitted.forecast(
+        hw_future = final_hw_fitted.forecast(
             steps=count
         )
 
-        future_forecasts[
-            "ETS"
-        ] = [
-            float(value)
-            for value in ets_forecast
-        ]
-
     except Exception:
 
-        future_forecasts[
-            "ETS"
-        ] = [np.nan] * count
+        hw_future = [
+            np.nan
+        ] * count
 
     # ========================================================
-    # SARIMA
+    # 8. FINAL SARIMA FORECAST
     # ========================================================
 
     try:
 
-        sarima_model = SARIMAX(
+        final_sarima_model = SARIMAX(
             y.values,
             order=(1, 1, 1),
             seasonal_order=(
@@ -687,122 +459,27 @@ def generate_forecast_output(
             enforce_invertibility=False
         )
 
-        sarima_fitted = sarima_model.fit(
-            disp=False
+        final_sarima_fitted = (
+            final_sarima_model.fit(
+                disp=False
+            )
         )
 
-        sarima_forecast = (
-            sarima_fitted
+        sarima_future = (
+            final_sarima_fitted
             .forecast(
                 steps=count
             )
         )
 
-        future_forecasts[
-            "SARIMA"
-        ] = [
-            float(value)
-            for value in sarima_forecast
-        ]
-
     except Exception:
 
-        future_forecasts[
-            "SARIMA"
-        ] = [np.nan] * count
+        sarima_future = [
+            np.nan
+        ] * count
 
     # ========================================================
-    # RANDOM FOREST
-    # ========================================================
-
-    try:
-
-        rf_df = pd.DataFrame({
-            "y": y.values
-        })
-
-        rf_df["lag_1"] = rf_df["y"].shift(1)
-        rf_df["lag_2"] = rf_df["y"].shift(2)
-        rf_df["lag_3"] = rf_df["y"].shift(3)
-
-        rf_df["rolling_mean_3"] = (
-            rf_df["y"]
-            .shift(1)
-            .rolling(3)
-            .mean()
-        )
-
-        rf_df = rf_df.dropna()
-
-        rf_model = RandomForestRegressor(
-            n_estimators=200,
-            random_state=42,
-            n_jobs=-1
-        )
-
-        rf_model.fit(
-            rf_df[
-                [
-                    "lag_1",
-                    "lag_2",
-                    "lag_3",
-                    "rolling_mean_3"
-                ]
-            ],
-            rf_df["y"]
-        )
-
-        rf_history = list(
-            y.values
-        )
-
-        rf_forecasts = []
-
-        for _ in range(count):
-
-            rf_input = pd.DataFrame({
-                "lag_1": [
-                    rf_history[-1]
-                ],
-                "lag_2": [
-                    rf_history[-2]
-                ],
-                "lag_3": [
-                    rf_history[-3]
-                ],
-                "rolling_mean_3": [
-                    np.mean(
-                        rf_history[-3:]
-                    )
-                ]
-            })
-
-            prediction = float(
-                rf_model.predict(
-                    rf_input
-                )[0]
-            )
-
-            rf_forecasts.append(
-                prediction
-            )
-
-            rf_history.append(
-                prediction
-            )
-
-        future_forecasts[
-            "Random Forest"
-        ] = rf_forecasts
-
-    except Exception:
-
-        future_forecasts[
-            "Random Forest"
-        ] = [np.nan] * count
-
-    # ========================================================
-    # 12. FUTURE DATES
+    # 9. FUTURE DATES
     # ========================================================
 
     if frequency == "weekly":
@@ -822,102 +499,46 @@ def generate_forecast_output(
         )
 
     # ========================================================
-    # 13. CREATE FINAL RESPONSE
+    # 10. HISTORICAL RESPONSE
     # ========================================================
 
-    response = {
-
-        "frequency": frequency,
-
-        "forecast_count": count,
-
-        "historical": [],
-
-        "models": []
-    }
-
-    # ========================================================
-    # 14. HISTORICAL DATA
-    # ========================================================
+    historical = []
 
     for date, value in y.items():
 
-        response[
-            "historical"
-        ].append({
-
+        historical.append({
             "Date": date.strftime(
                 "%Y-%m-%d"
             ),
-
             "Actual": round(
                 float(value),
                 2
             ),
-
             "Type": "historical"
         })
 
     # ========================================================
-    # 15. MODEL OUTPUT
+    # 11. MODEL RESPONSE BUILDER
     # ========================================================
 
-    for model_name in [
-        "Seasonal Naive",
-        "ETS",
-        "SARIMA",
-        "Random Forest"
-    ]:
-
-        actual_values = (
-            model_results[
-                model_name
-            ]["actual"]
-        )
-
-        validation_forecasts = (
-            model_results[
-                model_name
-            ]["forecast"]
-        )
-
-        # ----------------------------------------------------
-        # WAPE
-        # ----------------------------------------------------
-
-        wape = calculate_wape(
-            actual_values,
-            validation_forecasts
-        )
-
-        # ----------------------------------------------------
-        # ACCURACY
-        # ----------------------------------------------------
-
-        accuracy = calculate_accuracy(
-            actual_values,
-            validation_forecasts
-        )
-
-        # ----------------------------------------------------
-        # FORECAST ARRAY
-        # ----------------------------------------------------
+    def build_model_response(
+        model_name,
+        accuracy,
+        wape,
+        forecast_values
+    ):
 
         forecast_records = []
 
         for date, value in zip(
             future_dates,
-            future_forecasts[
-                model_name
-            ]
+            forecast_values
         ):
 
             forecast_records.append({
-
                 "Date": date.strftime(
                     "%Y-%m-%d"
                 ),
-
                 "Forecast": (
                     None
                     if not np.isfinite(value)
@@ -928,33 +549,42 @@ def generate_forecast_output(
                 )
             })
 
-        # ----------------------------------------------------
-        # ADD MODEL
-        # ----------------------------------------------------
-
-        response[
-            "models"
-        ].append({
-
+        return {
             "model": model_name,
-
             "accuracy": (
                 None
                 if not np.isfinite(accuracy)
                 else f"{accuracy:.2f}%"
             ),
-
             "wape": (
                 None
                 if not np.isfinite(wape)
                 else f"{wape:.2f}%"
             ),
-
             "forecast": forecast_records
-        })
+        }
 
     # ========================================================
-    # 16. RETURN
+    # 12. RETURN ALL MODELS
     # ========================================================
 
-    return response
+    return {
+        "frequency": frequency,
+        "forecast_count": count,
+        "historical": historical,
+        "models": [
+            build_model_response(
+                "Holt-Winters",
+                hw_accuracy,
+                hw_wape,
+                hw_future
+            ),
+            build_model_response(
+                "SARIMA",
+                sarima_accuracy,
+                sarima_wape,
+                sarima_future
+            )
+        ]
+    }
+
