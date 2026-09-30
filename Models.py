@@ -172,6 +172,7 @@ def generate_forecast_output(
               .sum()
               .to_frame()
         )
+        df = df[df[target_column] != 0]
 
     elif frequency == "monthly":
 
@@ -181,6 +182,7 @@ def generate_forecast_output(
               .sum()
               .to_frame()
         )
+        df = df[df[target_column] != 0]
 
     y = df[target_column].astype(float)
 
