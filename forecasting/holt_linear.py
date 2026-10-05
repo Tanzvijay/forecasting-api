@@ -5,13 +5,9 @@ def forecast_holt_linear(y, count):
     model = Holt(
         y,
         exponential=False,
-        damped_trend=False
+        damped_trend=True
     )
 
-    fitted = model.fit(
-        optimized=True
-    )
+    fitted = model.fit(optimized=True)
 
-    return fitted.forecast(
-        steps=count
-    )
+    return fitted.forecast(steps=count)
