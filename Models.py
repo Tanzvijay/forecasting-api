@@ -3,16 +3,87 @@ import pandas as pd
 
 from typing import Literal
 
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-
-from sklearn.metrics import (
-    mean_absolute_error,
-    mean_squared_error,
-    r2_score,
-)
-
 from fastapi import HTTPException
+
+import repo
+
+from forecasting.holtwinters import forecast_holt_winters
+from forecasting.holt_linear import forecast_holt_linear
+from forecasting.arima import forecast_arima
+
+
+# ============================================================
+# DETECT FREQUENCY FROM DATE
+# ============================================================
+
+def detect_frequency(
+    df: pd.DataFrame,
+    date_column: str = "Date"
+) -> str:
+
+    if date_column not in df.columns:
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"Date column '{date_column}' not found."
+        )
+
+    dates = (
+        pd.to_datetime(
+            df[date_column],
+            errors="coerce"
+        )
+        .dropna()
+        .sort_values()
+        .drop_duplicates()
+    )
+
+    if len(dates) < 2:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Not enough date values to detect frequency."
+        )
+
+    differences = (
+        dates
+        .diff()
+        .dropna()
+        .dt.total_seconds()
+        / 86400
+    )
+
+    median_days = differences.median()
+
+    # --------------------------------------------------------
+    # Daily
+    # --------------------------------------------------------
+
+    if median_days <= 2:
+
+        return "daily"
+
+    # --------------------------------------------------------
+    # Weekly
+    # --------------------------------------------------------
+
+    elif median_days <= 8:
+
+        return "weekly"
+
+    # --------------------------------------------------------
+    # Monthly
+    # --------------------------------------------------------
+
+    elif median_days <= 31:
+
+        return "monthly"
+
+    # --------------------------------------------------------
+    # Unknown
+    # --------------------------------------------------------
+
+    return "unknown"
 
 
 # ============================================================
@@ -21,10 +92,25 @@ from fastapi import HTTPException
 
 def prepare_forecast_df(
     df: pd.DataFrame,
-    frequency: Literal["raw", "weekly", "monthly"]
+    frequency: Literal[
+        "raw",
+        "weekly",
+        "monthly"
+    ]
 ) -> pd.DataFrame:
 
     df = df.copy()
+
+    # --------------------------------------------------------
+    # Check Date
+    # --------------------------------------------------------
+
+    if "Date" not in df.columns:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Date column 'Date' not found."
+        )
 
     # --------------------------------------------------------
     # Convert Date
@@ -39,8 +125,17 @@ def prepare_forecast_df(
         subset=["Date"]
     )
 
+    if df.empty:
+
+        raise HTTPException(
+            status_code=400,
+            detail="No valid date values available."
+        )
+
     # --------------------------------------------------------
-    # Raw
+    # RAW
+    #
+    # Raw means do not aggregate here.
     # --------------------------------------------------------
 
     if frequency == "raw":
@@ -51,7 +146,7 @@ def prepare_forecast_df(
         )
 
     # --------------------------------------------------------
-    # Weekly
+    # WEEKLY
     # --------------------------------------------------------
 
     elif frequency == "weekly":
@@ -63,20 +158,22 @@ def prepare_forecast_df(
               .reset_index()
         )
 
-        # Make Amount positive
         if "Amount" in df.columns:
 
             df["Amount"] = (
-                df["Amount"]
+                pd.to_numeric(
+                    df["Amount"],
+                    errors="coerce"
+                )
                 .abs()
             )
 
-        # IMPORTANT:
-        # Do NOT remove zero weeks.
-        # Keeping them maintains a continuous time series.
+            df = df[
+                df["Amount"] != 0
+            ]
 
     # --------------------------------------------------------
-    # Monthly
+    # MONTHLY
     # --------------------------------------------------------
 
     elif frequency == "monthly":
@@ -88,17 +185,29 @@ def prepare_forecast_df(
               .reset_index()
         )
 
-        # Make Amount positive
         if "Amount" in df.columns:
 
             df["Amount"] = (
-                df["Amount"]
+                pd.to_numeric(
+                    df["Amount"],
+                    errors="coerce"
+                )
                 .abs()
             )
 
-    # --------------------------------------------------------
-    # Final sorting
-    # --------------------------------------------------------
+            df = df[
+                df["Amount"] != 0
+            ]
+
+    else:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Frequency must be "
+                "'raw', 'weekly' or 'monthly'."
+            )
+        )
 
     return (
         df.sort_values("Date")
@@ -111,33 +220,261 @@ def prepare_forecast_df(
 # ============================================================
 
 def generate_forecast_output(
-    df: pd.DataFrame,
-    date_column: str,
-    target_column: str,
-    frequency: Literal["weekly", "monthly"],
+    frequency: Literal[
+        "raw",
+        "weekly",
+        "monthly"
+    ],
     count: int
 ):
 
     # ========================================================
-    # 1. PREPARE DATA
+    # 1. CHECK FILTERED DATA
     # ========================================================
 
-    df = df.copy()
+    if repo.latest_filtered_df is None:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No filtered data available. "
+                "Please call the table data endpoint first."
+            )
+        )
+
+    # ========================================================
+    # 2. GET FILTERED DATA
+    # ========================================================
+
+    df = repo.latest_filtered_df.copy()
+
+    if df.empty:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Filtered dataframe is empty."
+        )
+
+    # ========================================================
+    # 3. GET SELECTED DATE / TARGET COLUMNS
+    # ========================================================
+
+    date_column = getattr(
+        repo,
+        "latest_date_column",
+        None
+    )
+
+    target_column = getattr(
+        repo,
+        "latest_target_column",
+        None
+    )
+
+    if not date_column:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Date column information is not available. "
+                "Please call /tables/{table_name} first."
+            )
+        )
+
+    if not target_column:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Target column information is not available. "
+                "Please call /tables/{table_name} first."
+            )
+        )
+
+    # ========================================================
+    # 4. CHECK SELECTED DATE COLUMN
+    # ========================================================
 
     if date_column not in df.columns:
+
         raise HTTPException(
             status_code=400,
-            detail=f"Date column '{date_column}' not found."
+            detail={
+                "message": (
+                    f"Date column '{date_column}' "
+                    f"not found in filtered dataframe."
+                ),
+                "available_columns": (
+                    df.columns.tolist()
+                )
+            }
         )
+
+    # ========================================================
+    # 5. CHECK SELECTED TARGET COLUMN
+    # ========================================================
 
     if target_column not in df.columns:
+
         raise HTTPException(
             status_code=400,
-            detail=f"Target column '{target_column}' not found."
+            detail={
+                "message": (
+                    f"Target column '{target_column}' "
+                    f"not found in filtered dataframe."
+                ),
+                "available_columns": (
+                    df.columns.tolist()
+                )
+            }
         )
 
-    df[date_column] = pd.to_datetime(
+    # ========================================================
+    # 6. STANDARDIZE INTERNAL COLUMN NAMES
+    #
+    # Example:
+    #
+    # Month       -> Date
+    # TotalAmount -> Amount
+    #
+    # Forecasting code will always use Date and Amount.
+    # ========================================================
+
+    df["Date"] = pd.to_datetime(
         df[date_column],
+        errors="coerce"
+    )
+
+    df["Amount"] = pd.to_numeric(
+        df[target_column],
+        errors="coerce"
+    )
+
+    # ========================================================
+    # 7. REMOVE INVALID DATA
+    # ========================================================
+
+    df = df.dropna(
+        subset=[
+            "Date",
+            "Amount"
+        ]
+    )
+
+    if df.empty:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No valid date/target data "
+                "available for forecasting."
+            )
+        )
+
+    # ========================================================
+    # 8. MAKE TARGET POSITIVE
+    # ========================================================
+
+    df["Amount"] = (
+        df["Amount"]
+        .abs()
+    )
+
+    # ========================================================
+    # 9. RAW -> DETECT ACTUAL FREQUENCY
+    # ========================================================
+
+    if frequency == "raw":
+
+        frequency = detect_frequency(
+            df,
+            "Date"
+        )
+
+        if frequency == "unknown":
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Unable to detect forecasting frequency "
+                    "from the selected date column."
+                )
+            )
+
+        # ----------------------------------------------------
+        # Current forecasting models support weekly/monthly.
+        # ----------------------------------------------------
+
+        if frequency == "daily":
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Daily frequency was detected, but "
+                    "forecasting currently supports only "
+                    "weekly and monthly data."
+                )
+            )
+
+    # ========================================================
+    # 10. VALIDATE FREQUENCY
+    # ========================================================
+
+    if frequency not in [
+        "weekly",
+        "monthly"
+    ]:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Frequency must be "
+                "'raw', 'weekly' or 'monthly'."
+            )
+        )
+
+    # ========================================================
+    # 11. PREPARE DATA
+    # ========================================================
+
+    df = prepare_forecast_df(
+        df=df,
+        frequency=frequency
+    )
+
+    # ========================================================
+    # 12. DATE VALIDATION
+    # ========================================================
+
+    if "Date" not in df.columns:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Date column 'Date' not found."
+        )
+
+    # ========================================================
+    # 13. TARGET VALIDATION
+    # ========================================================
+
+    target_column = "Amount"
+
+    if target_column not in df.columns:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Target column 'Amount' not found "
+                "in the filtered dataframe."
+            )
+        )
+
+    # ========================================================
+    # 14. CONVERT DATA TYPES
+    # ========================================================
+
+    df["Date"] = pd.to_datetime(
+        df["Date"],
         errors="coerce"
     )
 
@@ -148,78 +485,140 @@ def generate_forecast_output(
 
     df = df.dropna(
         subset=[
-            date_column,
+            "Date",
             target_column
         ]
     )
+
+    if df.empty:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No valid data available "
+                "for forecasting."
+            )
+        )
+
+    # ========================================================
+    # 15. MAKE TARGET POSITIVE
+    # ========================================================
 
     df[target_column] = (
         df[target_column]
         .abs()
     )
 
-    df = df.sort_values(date_column)
-
     # ========================================================
-    # 2. AGGREGATE TIME SERIES
+    # 16. SORT DATA
     # ========================================================
 
-    if frequency == "weekly":
+    df = (
+        df.sort_values("Date")
+          .reset_index(drop=True)
+    )
 
-        df = (
+    df = (
             df.set_index(date_column)
               .resample("W-SUN")[target_column]
               .sum()
               .to_frame()
         )
-        df = df[df[target_column] != 0]
+    df = df[df[target_column] != 0]
 
-    elif frequency == "monthly":
+    df = (
+        df.groupby(
+            "Date",
+            as_index=True
+        )[target_column]
+        .sum()
+        .to_frame()
+    )
 
-        df = (
+
+    df = (
             df.set_index(date_column)
               .resample("ME")[target_column]
               .sum()
               .to_frame()
         )
-        df = df[df[target_column] != 0]
+    df = df[df[target_column] != 0]
 
-    y = df[target_column].astype(float)
+    # ========================================================
+    # 18. REMOVE ZERO VALUES
+    # ========================================================
+
+
+    df = df[
+        df[target_column] != 0
+    ]
+
+    # ========================================================
+    # 19. TARGET SERIES
+    # ========================================================
+
+    y = df[
+        target_column
+    ].astype(float)
 
     if y.empty:
-        raise HTTPException(
-            status_code=400,
-            detail="No valid data available for forecasting."
-        )
 
-    # ========================================================
-    # 3. VALIDATION SETTINGS
-    # ========================================================
-
-    if frequency == "monthly":
-        seasonal_period = 12
-        initial_train_size = 24
-    else:
-        seasonal_period = 52
-        initial_train_size = 104
-
-    if len(y) <= initial_train_size:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Not enough data for {frequency} forecasting. "
-                f"Minimum required observations: "
-                f"{initial_train_size + 1}. "
-                f"Available: {len(y)}."
+                "No valid data available "
+                "for forecasting."
             )
         )
 
     # ========================================================
-    # 4. WAPE / ACCURACY
-    # Accuracy = 100 - WAPE
+    # 20. TRAIN / TEST SPLIT
     # ========================================================
 
-    def calculate_wape(actual, forecast):
+    train_ratio = 0.70
+
+    initial_train_size = int(
+        len(y) * train_ratio
+    )
+
+    # ========================================================
+    # 21. SEASONAL PERIOD
+    # ========================================================
+
+    if frequency == "monthly":
+
+        seasonal_period = 12
+
+    else:
+
+        seasonal_period = 52
+
+    # ========================================================
+    # 22. MINIMUM DATA CHECK
+    # ========================================================
+
+    if initial_train_size <= seasonal_period:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Not enough data for "
+                f"{frequency} forecasting. "
+                f"At least "
+                f"{seasonal_period + 1} observations "
+                f"are required in the initial "
+                f"training period."
+            )
+        )
+
+    # ========================================================
+    # 23. WAPE
+    # ========================================================
+
+    def calculate_wape(
+        actual,
+        forecast
+    ):
 
         actual = np.asarray(
             actual,
@@ -238,9 +637,11 @@ def generate_forecast_output(
         )
 
         actual = actual[valid]
+
         forecast = forecast[valid]
 
         if len(actual) == 0:
+
             return np.inf
 
         denominator = np.sum(
@@ -248,6 +649,7 @@ def generate_forecast_output(
         )
 
         if denominator == 0:
+
             return np.inf
 
         return float(
@@ -257,11 +659,19 @@ def generate_forecast_output(
                         actual - forecast
                     )
                 )
-                / denominator
+                /
+                denominator
             ) * 100
         )
 
-    def calculate_accuracy(actual, forecast):
+    # ========================================================
+    # 24. ACCURACY
+    # ========================================================
+
+    def calculate_accuracy(
+        actual,
+        forecast
+    ):
 
         wape = calculate_wape(
             actual,
@@ -269,6 +679,7 @@ def generate_forecast_output(
         )
 
         if not np.isfinite(wape):
+
             return np.nan
 
         return max(
@@ -277,28 +688,44 @@ def generate_forecast_output(
         )
 
     # ========================================================
-    # 5. WALK-FORWARD VALIDATION
+    # 25. TEST DATA
     # ========================================================
 
     test = y.iloc[
         initial_train_size:
     ]
 
+    # ========================================================
+    # 26. HOLT-WINTERS HISTORY
+    # ========================================================
+
     hw_history = y.iloc[
         :initial_train_size
     ].copy()
 
-    sarima_history = list(
+
+
+    holt_linear_history = list(
         y.iloc[
             :initial_train_size
         ].values
     )
 
+    # ========================================================
+    # 28. VALIDATION STORAGE
+    # ========================================================
+
     hw_actuals = []
+
     hw_forecasts = []
 
-    sarima_actuals = []
-    sarima_forecasts = []
+    holt_linear_actuals = []
+
+    holt_linear_forecasts = []
+
+    # ========================================================
+    # 29. WALK-FORWARD VALIDATION
+    # ========================================================
 
     for date, actual_value in test.items():
 
@@ -308,23 +735,12 @@ def generate_forecast_output(
 
         try:
 
-            hw_model = ExponentialSmoothing(
-                hw_history,
-                trend="add",
-                seasonal="add",
-                seasonal_periods=seasonal_period,
-                initialization_method="estimated"
-            )
-
-            hw_fitted = hw_model.fit(
-                optimized=True,
-                use_brute=True
-            )
-
             hw_prediction = float(
-                hw_fitted
-                .forecast(steps=1)
-                .iloc[0]
+                forecast_holt_winters(
+                    hw_history,
+                    seasonal_period,
+                    1
+                ).iloc[0]
             )
 
         except Exception:
@@ -340,57 +756,51 @@ def generate_forecast_output(
         )
 
         # ----------------------------------------------------
-        # SARIMA
+        # holt_linear
         # ----------------------------------------------------
 
         try:
 
-            sarima_model = SARIMAX(
-                sarima_history,
-                order=(1, 1, 1),
-                seasonal_order=(
-                    0,
-                    0,
-                    0,
-                    seasonal_period
-                ),
-                enforce_stationarity=False,
-                enforce_invertibility=False
-            )
 
-            sarima_fitted = sarima_model.fit(
-                disp=False
-            )
 
-            sarima_prediction = float(
-                sarima_fitted
-                .forecast(steps=1)[0]
-            )
+            holt_linear_prediction = float(
+    np.asarray(
+        forecast_holt_linear(
+            holt_linear_history,
+            1
+        )
+    )[0]
+)
 
-        except Exception:
+        except Exception as e:
+            print(
+        f"Holt Linear validation error: {repr(e)}"
+        )
 
-            sarima_prediction = np.nan
+            raise e
 
-        sarima_actuals.append(
+        holt_linear_actuals.append(
             actual_value
         )
 
-        sarima_forecasts.append(
-            sarima_prediction
+        holt_linear_forecasts.append(
+            holt_linear_prediction
         )
 
         # ----------------------------------------------------
         # EXPANDING WINDOW
         # ----------------------------------------------------
 
-        hw_history.loc[date] = actual_value
+        hw_history.loc[date] = (
+            actual_value
+        )
 
-        sarima_history.append(
+        holt_linear_history.append(
             actual_value
         )
 
     # ========================================================
-    # 6. CALCULATE EACH MODEL ACCURACY
+    # 30. HOLT-WINTERS METRICS
     # ========================================================
 
     hw_wape = calculate_wape(
@@ -403,91 +813,175 @@ def generate_forecast_output(
         hw_forecasts
     )
 
-    sarima_wape = calculate_wape(
-        sarima_actuals,
-        sarima_forecasts
-    )
+    # ========================================================
+    # 31. SARIMA METRICS
+    # ========================================================
 
-    sarima_accuracy = calculate_accuracy(
-        sarima_actuals,
-        sarima_forecasts
-    )
+    holt_linear_wape = calculate_wape(
+    holt_linear_actuals,
+    holt_linear_forecasts
+)
+
+    holt_linear_accuracy = calculate_accuracy(
+    holt_linear_actuals,
+    holt_linear_forecasts
+)
 
     # ========================================================
-    # 7. FINAL HOLT-WINTERS FORECAST
+    # 32. ARIMA VALIDATION
+    # ========================================================
+
+    arima_wape = np.inf
+
+    arima_accuracy = np.nan
+
+    arima_order = None
+
+    try:
+
+        arima_train = (
+            y.iloc[
+                :initial_train_size
+            ].values
+        )
+
+        arima_test_forecast, arima_order = (
+            forecast_arima(
+                arima_train,
+                len(test)
+            )
+        )
+
+        arima_test_forecast = np.asarray(
+            arima_test_forecast,
+            dtype=float
+        )
+
+        arima_wape = calculate_wape(
+            test.values,
+            arima_test_forecast
+        )
+
+        arima_accuracy = calculate_accuracy(
+            test.values,
+            arima_test_forecast
+        )
+
+    except Exception as e:
+
+        print(
+            f"ARIMA validation error: {e}"
+        )
+
+        arima_wape = np.inf
+
+        arima_accuracy = np.nan
+
+        arima_order = None
+
+    # ========================================================
+    # 33. FINAL HOLT-WINTERS FORECAST
     # ========================================================
 
     try:
 
-        final_hw_model = ExponentialSmoothing(
+        hw_future = forecast_holt_winters(
             y,
-            trend="add",
-            seasonal="add",
-            seasonal_periods=seasonal_period,
-            initialization_method="estimated"
+            seasonal_period,
+            count
         )
 
-        final_hw_fitted = final_hw_model.fit(
-            optimized=True,
-            use_brute=True
+        hw_future = np.asarray(
+            hw_future,
+            dtype=float
         )
 
-        hw_future = final_hw_fitted.forecast(
-            steps=count
+    except Exception as e:
+
+        print(
+            f"Holt-Winters forecast error: {e}"
         )
 
-    except Exception:
+        hw_future = np.array(
+            [np.nan] * count
+        )
 
-        hw_future = [
-            np.nan
-        ] * count
+   
+    # ========================================================
+    # 34. FINAL HOLT LINEAR FORECAST
+    # ========================================================
 
     # ========================================================
-    # 8. FINAL SARIMA FORECAST
+# 34. FINAL HOLT LINEAR FORECAST
+# ========================================================
+
+    try:
+
+
+        holt_linear_future = forecast_holt_linear(
+        y,
+        count
+        )
+
+        holt_linear_future = np.asarray(
+        holt_linear_future,
+        dtype=float
+        )
+
+    except Exception as e:
+
+
+        print(
+        f"Holt Linear forecast error: {repr(e)}"
+        )
+
+        raise e
+    # ========================================================
+    # 35. FINAL ARIMA FORECAST
     # ========================================================
 
     try:
 
-        final_sarima_model = SARIMAX(
-            y.values,
-            order=(1, 1, 1),
-            seasonal_order=(
-                0,
-                0,
-                0,
-                seasonal_period
-            ),
-            enforce_stationarity=False,
-            enforce_invertibility=False
-        )
-
-        final_sarima_fitted = (
-            final_sarima_model.fit(
-                disp=False
+        arima_future, final_arima_order = (
+            forecast_arima(
+                y.values,
+                count
             )
         )
 
-        sarima_future = (
-            final_sarima_fitted
-            .forecast(
-                steps=count
-            )
+        arima_future = np.asarray(
+            arima_future,
+            dtype=float
         )
 
-    except Exception:
+        if final_arima_order is not None:
 
-        sarima_future = [
-            np.nan
-        ] * count
+            arima_order = final_arima_order
+
+    except Exception as e:
+
+        print(
+            f"ARIMA forecast error: {e}"
+        )
+
+        arima_future = np.array(
+            [np.nan] * count
+        )
 
     # ========================================================
-    # 9. FUTURE DATES
+    # 36. FUTURE DATES
     # ========================================================
 
     if frequency == "weekly":
 
         future_dates = pd.date_range(
-            start=y.index[-1] + pd.Timedelta(weeks=1),
+            start=(
+                y.index[-1]
+                +
+                pd.Timedelta(
+                    weeks=1
+                )
+            ),
             periods=count,
             freq="W-SUN"
         )
@@ -495,13 +989,17 @@ def generate_forecast_output(
     else:
 
         future_dates = pd.date_range(
-            start=y.index[-1] + pd.offsets.MonthEnd(1),
+            start=(
+                y.index[-1]
+                +
+                pd.offsets.MonthEnd(1)
+            ),
             periods=count,
             freq="ME"
         )
 
     # ========================================================
-    # 10. HISTORICAL RESPONSE
+    # 37. HISTORICAL RESPONSE
     # ========================================================
 
     historical = []
@@ -509,25 +1007,29 @@ def generate_forecast_output(
     for date, value in y.items():
 
         historical.append({
+
             "Date": date.strftime(
                 "%Y-%m-%d"
             ),
+
             "Actual": round(
                 float(value),
                 2
             ),
+
             "Type": "historical"
         })
 
     # ========================================================
-    # 11. MODEL RESPONSE BUILDER
+    # 38. MODEL RESPONSE BUILDER
     # ========================================================
 
     def build_model_response(
         model_name,
         accuracy,
         wape,
-        forecast_values
+        forecast_values,
+        order=None
     ):
 
         forecast_records = []
@@ -538,9 +1040,11 @@ def generate_forecast_output(
         ):
 
             forecast_records.append({
+
                 "Date": date.strftime(
                     "%Y-%m-%d"
                 ),
+
                 "Forecast": (
                     None
                     if not np.isfinite(value)
@@ -551,42 +1055,112 @@ def generate_forecast_output(
                 )
             })
 
-        return {
+        response = {
+
             "model": model_name,
+
             "accuracy": (
                 None
                 if not np.isfinite(accuracy)
                 else f"{accuracy:.2f}%"
             ),
+
             "wape": (
                 None
                 if not np.isfinite(wape)
                 else f"{wape:.2f}%"
             ),
+
             "forecast": forecast_records
         }
 
+        if order is not None:
+
+            response["order"] = list(
+                order
+            )
+
+        return response
+
     # ========================================================
-    # 12. RETURN ALL MODELS
+    # 39. BUILD MODELS
+    # ========================================================
+
+    models = [
+    build_model_response(
+        "Holt-Winters",
+        hw_accuracy,
+        hw_wape,
+        hw_future
+    ),
+    build_model_response(
+        "Holt Linear",
+        holt_linear_accuracy,
+        holt_linear_wape,
+        holt_linear_future
+    ),
+    build_model_response(
+        "ARIMA",
+        arima_accuracy,
+        arima_wape,
+        arima_future,
+        arima_order
+    )
+    ]
+    # ========================================================
+    # 40. SELECT TOP MODEL
+    # ========================================================
+
+    valid_models = [
+
+        model
+
+        for model in models
+
+        if model["wape"] is not None
+    ]
+
+    if valid_models:
+
+        top_model = min(
+            valid_models,
+            key=lambda model:
+                float(
+                    model["wape"]
+                    .replace(
+                        "%",
+                        ""
+                    )
+                )
+        )
+
+        top_model_name = (
+            top_model["model"]
+        )
+
+        top_model_wape = (
+            top_model["wape"]
+        )
+
+        top_model_accuracy = (
+            top_model["accuracy"]
+        )
+
+    else:
+
+        top_model_name = None
+
+        top_model_wape = None
+
+        top_model_accuracy = None
+
+    # ========================================================
+    # 41. RETURN RESPONSE
     # ========================================================
 
     return {
-        "frequency": frequency,
-        "forecast_count": count,
-        "historical": historical,
-        "models": [
-            build_model_response(
-                "Holt-Winters",
-                hw_accuracy,
-                hw_wape,
-                hw_future
-            ),
-            build_model_response(
-                "SARIMA",
-                sarima_accuracy,
-                sarima_wape,
-                sarima_future
-            )
-        ]
-    }
-
+    "frequency": frequency,
+    "forecast_count": count,
+    "historical": historical,
+    "models": models,
+}

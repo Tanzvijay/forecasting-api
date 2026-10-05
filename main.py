@@ -236,57 +236,9 @@ def generate_forecast(
     frequency: Literal["raw", "weekly", "monthly"] = Query(...),
     count: int = Query(..., ge=1),
 ):
-    if repo.latest_filtered_df is None:
-        raise HTTPException(
-            status_code=404,
-            detail="No filtered data available."
-        )
-
-    df = repo.latest_filtered_df.copy()
-
-    df = prepare_forecast_df(
-        df=df,
-        frequency=frequency
-    )
-
     return generate_forecast_output(
-        df=df,
-        date_column="Date",
-        target_column="Amount",
-        frequency=frequency if frequency != "raw" else "monthly",
+        frequency=frequency,
         count=count,
     )
 
 
-@app.get("/forecast-accuracy")
-def forecast_accuracy(
-    frequency: Literal["weekly", "monthly"] = Query(...)
-):
-
-    if repo.latest_filtered_df is None:
-        raise HTTPException(
-            status_code=404,
-            detail="No filtered data available."
-        )
-
-    df = repo.latest_filtered_df.copy()
-
-    df = prepare_forecast_df(
-        df=df,
-        frequency=frequency
-    )
-
-    result = generate_forecast_output(
-        df=df,
-        date_column="Date",
-        target_column="Amount",
-        frequency=frequency,
-        count=1,
-        return_accuracy=True
-    )
-
-    return {
-        "frequency": frequency,
-        "accuracy": result["accuracy"],
-        "selected_model": result["selected_model"]
-    }

@@ -3,39 +3,66 @@ from typing import Literal, Optional
 
 import numpy as np
 import pandas as pd
+
 from dotenv import load_dotenv
+
 from fastapi import (
     FastAPI,
     Depends,
     HTTPException,
     Query,
 )
+
 from fastapi import UploadFile, File
+
 from pathlib import Path
 import re
+
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
+
+
+# ============================================================
+# UPLOAD FILE
+# ============================================================
 
 def upload_file_to_database(
     file: UploadFile,
     table_name: str,
 ):
     try:
+
         # -----------------------------------------
         # Validate file extension
         # -----------------------------------------
-        file_extension = Path(file.filename).suffix.lower()
 
-        if file_extension not in [".csv", ".xlsx", ".xls"]:
+        file_extension = Path(
+            file.filename
+        ).suffix.lower()
+
+        if file_extension not in [
+            ".csv",
+            ".xlsx",
+            ".xls"
+        ]:
+
             raise HTTPException(
                 status_code=400,
-                detail="Only CSV, XLSX and XLS files are supported."
+                detail=(
+                    "Only CSV, XLSX and XLS "
+                    "files are supported."
+                )
             )
 
         # -----------------------------------------
         # Validate table name
         # -----------------------------------------
-        if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table_name):
+
+        if not re.match(
+            r"^[a-zA-Z_][a-zA-Z0-9_]*$",
+            table_name
+        ):
+
             raise HTTPException(
                 status_code=400,
                 detail="Invalid table name."
@@ -44,18 +71,25 @@ def upload_file_to_database(
         # -----------------------------------------
         # Read uploaded file
         # -----------------------------------------
+
         if file_extension == ".csv":
 
-            df = pd.read_csv(file.file)
+            df = pd.read_csv(
+                file.file
+            )
 
         else:
 
-            df = pd.read_excel(file.file)
+            df = pd.read_excel(
+                file.file
+            )
 
         # -----------------------------------------
         # Check empty file
         # -----------------------------------------
+
         if df.empty:
+
             raise HTTPException(
                 status_code=400,
                 detail="Uploaded file is empty."
@@ -64,8 +98,10 @@ def upload_file_to_database(
         # -----------------------------------------
         # Clean column names
         # -----------------------------------------
+
         df.columns = [
-            str(col).strip()
+            str(col)
+            .strip()
             .replace(" ", "_")
             .replace("-", "_")
             for col in df.columns
@@ -74,6 +110,7 @@ def upload_file_to_database(
         # -----------------------------------------
         # Save dataframe to PostgreSQL
         # -----------------------------------------
+
         df.to_sql(
             table_name,
             con=engine,
@@ -91,6 +128,7 @@ def upload_file_to_database(
         }
 
     except HTTPException:
+
         raise
 
     except Exception as e:
@@ -100,6 +138,11 @@ def upload_file_to_database(
             detail=str(e)
         )
 
+
+# ============================================================
+# DATABASE
+# ============================================================
+
 load_dotenv()
 
 DB_HOST = os.getenv("DB_HOST")
@@ -108,16 +151,19 @@ DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 
+
 DATABASE_URL = (
     f"postgresql+psycopg2://"
     f"{DB_USER}:{DB_PASSWORD}"
     f"@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
 
+
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
 )
+
 
 SessionLocal = sessionmaker(
     autocommit=False,
@@ -125,20 +171,45 @@ SessionLocal = sessionmaker(
     bind=engine,
 )
 
+
+# ============================================================
+# LATEST FORECAST DATA
+# ============================================================
+
 latest_filtered_df = None
+
+# Selected date column from /tables/{table_name}
+latest_date_column = None
+
+# Selected target column from /tables/{table_name}
+latest_target_column = None
+
+
+# ============================================================
+# DATABASE SESSION
+# ============================================================
+
 def get_db():
+
     db = SessionLocal()
 
     try:
+
         yield db
+
     finally:
+
         db.close()
 
 
-
+# ============================================================
+# GET TABLES
+# ============================================================
 
 def get_tables(db: Session):
+
     try:
+
         tables = list_tables(db)
 
         return {
@@ -146,13 +217,21 @@ def get_tables(db: Session):
         }
 
     except Exception as e:
+
         raise HTTPException(
             status_code=500,
             detail=str(e),
         )
 
 
-def list_tables(db: Session):
+# ============================================================
+# LIST TABLES
+# ============================================================
+
+def list_tables(
+    db: Session
+):
+
     query = text(
         """
         SELECT table_name
@@ -162,7 +241,9 @@ def list_tables(db: Session):
         """
     )
 
-    result = db.execute(query)
+    result = db.execute(
+        query
+    )
 
     return [
         row[0]
@@ -170,13 +251,21 @@ def list_tables(db: Session):
     ]
 
 
+# ============================================================
+# LOAD TABLE DATAFRAME
+# ============================================================
+
 def load_table_dataframe(
     table_name: str,
     db: Session,
 ) -> pd.DataFrame:
-    tables = list_tables(db)
+
+    tables = list_tables(
+        db
+    )
 
     if table_name not in tables:
+
         raise ValueError(
             f"Table '{table_name}' does not exist."
         )
@@ -186,11 +275,18 @@ def load_table_dataframe(
         con=db.bind,
     )
 
+
+# ============================================================
+# GET TABLE COLUMNS
+# ============================================================
+
 def get_table_columns_data(
     table_name: str,
     db: Session,
 ):
+
     try:
+
         df = load_table_dataframe(
             table_name,
             db,
@@ -202,33 +298,45 @@ def get_table_columns_data(
         }
 
     except ValueError as e:
+
         raise HTTPException(
             status_code=404,
             detail=str(e),
         )
 
     except Exception as e:
+
         raise HTTPException(
             status_code=500,
             detail=str(e),
         )
 
 
+# ============================================================
+# GET UNIQUE VALUES
+# ============================================================
+
 def get_unique_values_data(
     table_name: str,
     column_name: str,
     db: Session,
 ):
+
     try:
+
         df = load_table_dataframe(
             table_name,
             db,
         )
 
         if column_name not in df.columns:
+
             raise HTTPException(
                 status_code=404,
-                detail=f"Column '{column_name}' not found.",
+                detail=(
+                    f"Column '{column_name}' "
+                    f"not found."
+                ),
             )
 
         values = (
@@ -245,51 +353,62 @@ def get_unique_values_data(
         }
 
     except ValueError as e:
+
         raise HTTPException(
             status_code=404,
             detail=str(e),
         )
 
     except HTTPException:
+
         raise
 
     except Exception as e:
+
         raise HTTPException(
             status_code=500,
             detail=str(e),
         )
 
 
+# ============================================================
+# GET TABLE DATA
+# ============================================================
+
 def get_table_data_data(
     table_name: str,
     filter_column: Optional[str],
     filter_value: Optional[str],
     use_date_column: bool,
-    selected_columns: Optional[str],   # None when use_date_column=True
-    date_column: Optional[str],        # None when use_date_column=False
-    target_column: Optional[str],      # None when use_date_column=False
+    selected_columns: Optional[str],
+    date_column: Optional[str],
+    target_column: Optional[str],
     db: Session,
 ):
+
     global latest_filtered_df
+    global latest_date_column
+    global latest_target_column
 
     try:
 
-        # ========================================================
+        # ====================================================
         # LOAD TABLE
-        # ========================================================
+        # ====================================================
 
         df = load_table_dataframe(
             table_name,
             db,
         )
 
-        # ========================================================
+        # ====================================================
         # FILTER ROWS
-        # ========================================================
+        # ====================================================
 
         if filter_column is not None:
 
             if filter_column not in df.columns:
+
                 raise HTTPException(
                     status_code=400,
                     detail=(
@@ -308,6 +427,7 @@ def get_table_data_data(
                 ]
 
                 if not filter_values:
+
                     raise HTTPException(
                         status_code=400,
                         detail=(
@@ -324,19 +444,26 @@ def get_table_data_data(
                     .isin(filter_values)
                 ].copy()
 
-        # ========================================================
-        # BRANCH — use_date_column=False → HARDCODED tally columns
-        #          use_date_column=True  → user input columns
-        # ========================================================
+        # ====================================================
+        # BRANCH
+        #
+        # use_date_column=False
+        # → Tally columns
+        #
+        # use_date_column=True
+        # → User-selected columns
+        # ====================================================
 
         if not use_date_column:
 
-            # ====================================================
+            # =================================================
             # HARDCODED TALLY COLUMNS
-            # ====================================================
+            # =================================================
 
-            TALLY_ID_COL     = "GUID"
-            TALLY_DATE_COL   = "Date"
+            TALLY_ID_COL = "GUID"
+
+            TALLY_DATE_COL = "Date"
+
             TALLY_AMOUNT_COL = "Amount"
 
             cols = [
@@ -345,9 +472,9 @@ def get_table_data_data(
                 TALLY_AMOUNT_COL,
             ]
 
-            # ====================================================
-            # CHECK HARDCODED COLUMNS EXIST IN TABLE
-            # ====================================================
+            # =================================================
+            # CHECK COLUMNS
+            # =================================================
 
             missing_columns = [
                 col
@@ -356,6 +483,7 @@ def get_table_data_data(
             ]
 
             if missing_columns:
+
                 raise HTTPException(
                     status_code=400,
                     detail={
@@ -364,42 +492,63 @@ def get_table_data_data(
                             "required tally columns: "
                             "GUID, Date, Amount."
                         ),
-                        "missing_columns": missing_columns,
+                        "missing_columns": (
+                            missing_columns
+                        ),
                         "available_columns": (
                             df.columns.tolist()
                         ),
                     },
                 )
 
-            # ====================================================
-            # CREATE SELECTED DATAFRAME
-            # ====================================================
+            # =================================================
+            # SELECT DATA
+            # =================================================
 
-            selected_df = df[cols].copy()
+            selected_df = df[
+                cols
+            ].copy()
 
-            # ====================================================
-            # PREPARE DATA
-            # ====================================================
+            # =================================================
+            # PREPARE DATE
+            # =================================================
 
-            selected_df[TALLY_DATE_COL] = pd.to_datetime(
-                selected_df[TALLY_DATE_COL],
+            selected_df[
+                TALLY_DATE_COL
+            ] = pd.to_datetime(
+                selected_df[
+                    TALLY_DATE_COL
+                ],
                 errors="coerce",
             )
 
-            selected_df[TALLY_AMOUNT_COL] = pd.to_numeric(
-                selected_df[TALLY_AMOUNT_COL],
+            # =================================================
+            # PREPARE AMOUNT
+            # =================================================
+
+            selected_df[
+                TALLY_AMOUNT_COL
+            ] = pd.to_numeric(
+                selected_df[
+                    TALLY_AMOUNT_COL
+                ],
                 errors="coerce",
             )
+
+            # =================================================
+            # DROP NULLS
+            # =================================================
 
             selected_df = selected_df.dropna(
                 subset=cols
             )
 
-            # ====================================================
-            # CHECK EMPTY RESULT
-            # ====================================================
+            # =================================================
+            # CHECK EMPTY
+            # =================================================
 
             if selected_df.empty:
+
                 raise HTTPException(
                     status_code=404,
                     detail={
@@ -407,60 +556,101 @@ def get_table_data_data(
                             "No rows found for the "
                             "specified filter."
                         ),
-                        "filter_column": filter_column,
-                        "filter_value":  filter_value,
+                        "filter_column": (
+                            filter_column
+                        ),
+                        "filter_value": (
+                            filter_value
+                        ),
                     },
                 )
 
-            # ====================================================
-            # GUID + Date + Amount SUMMARY
-            # ====================================================
+            # =================================================
+            # GUID + DATE + AMOUNT SUMMARY
+            # =================================================
 
             guid_positive_summary = (
                 selected_df
                 .assign(
-                    Amount=selected_df[TALLY_AMOUNT_COL].abs()
+                    Amount=(
+                        selected_df[
+                            TALLY_AMOUNT_COL
+                        ].abs()
+                    )
                 )
                 .groupby(
-                    [TALLY_ID_COL, TALLY_DATE_COL],
+                    [
+                        TALLY_ID_COL,
+                        TALLY_DATE_COL
+                    ],
                     as_index=False,
                 )[TALLY_AMOUNT_COL]
                 .sum()
             )
 
-            latest_filtered_df = guid_positive_summary.copy()
+            # =================================================
+            # SAVE LATEST DATA
+            # =================================================
+
+            latest_filtered_df = (
+                guid_positive_summary.copy()
+            )
+
+            # =================================================
+            # SAVE COLUMN INFORMATION
+            # =================================================
+
+            latest_date_column = (
+                TALLY_DATE_COL
+            )
+
+            latest_target_column = (
+                TALLY_AMOUNT_COL
+            )
 
             response_extra = {
-                "selected_columns": cols,   # ["GUID", "Date", "Amount"]
+
+                "selected_columns": cols
+
             }
 
         else:
 
-            # ====================================================
-            # CHECK date_column + target_column EXIST IN TABLE
-            # ====================================================
+            # =================================================
+            # CHECK DATE COLUMN
+            # =================================================
 
             if date_column not in df.columns:
+
                 raise HTTPException(
                     status_code=400,
                     detail={
                         "message": (
-                            f"date_column '{date_column}' "
-                            f"not found in table '{table_name}'."
+                            f"date_column "
+                            f"'{date_column}' "
+                            f"not found in table "
+                            f"'{table_name}'."
                         ),
                         "available_columns": (
                             df.columns.tolist()
                         ),
                     },
                 )
+
+            # =================================================
+            # CHECK TARGET COLUMN
+            # =================================================
 
             if target_column not in df.columns:
+
                 raise HTTPException(
                     status_code=400,
                     detail={
                         "message": (
-                            f"target_column '{target_column}' "
-                            f"not found in table '{table_name}'."
+                            f"target_column "
+                            f"'{target_column}' "
+                            f"not found in table "
+                            f"'{table_name}'."
                         ),
                         "available_columns": (
                             df.columns.tolist()
@@ -468,33 +658,60 @@ def get_table_data_data(
                     },
                 )
 
-            # ====================================================
-            # BUILD DATAFRAME FROM date_column + target_column
-            # ====================================================
+            # =================================================
+            # BUILD DATAFRAME
+            # =================================================
 
             selected_df = df[
-                [date_column, target_column]
+                [
+                    date_column,
+                    target_column
+                ]
             ].copy()
 
-            selected_df[date_column] = pd.to_datetime(
-                selected_df[date_column],
+            # =================================================
+            # PREPARE DATE
+            # =================================================
+
+            selected_df[
+                date_column
+            ] = pd.to_datetime(
+                selected_df[
+                    date_column
+                ],
                 errors="coerce",
             )
 
-            selected_df[target_column] = pd.to_numeric(
-                selected_df[target_column],
+            # =================================================
+            # PREPARE TARGET
+            # =================================================
+
+            selected_df[
+                target_column
+            ] = pd.to_numeric(
+                selected_df[
+                    target_column
+                ],
                 errors="coerce",
             )
+
+            # =================================================
+            # DROP NULLS
+            # =================================================
 
             selected_df = selected_df.dropna(
-                subset=[date_column, target_column]
+                subset=[
+                    date_column,
+                    target_column
+                ]
             )
 
-            # ====================================================
-            # CHECK EMPTY RESULT
-            # ====================================================
+            # =================================================
+            # CHECK EMPTY
+            # =================================================
 
             if selected_df.empty:
+
                 raise HTTPException(
                     status_code=404,
                     detail={
@@ -502,22 +719,30 @@ def get_table_data_data(
                             "No rows found for the "
                             "specified filter."
                         ),
-                        "filter_column": filter_column,
-                        "filter_value":  filter_value,
+                        "filter_column": (
+                            filter_column
+                        ),
+                        "filter_value": (
+                            filter_value
+                        ),
                     },
                 )
 
-            # ====================================================
-            # date_column + target_column SUMMARY
-            # ====================================================
+            # =================================================
+            # DATE + TARGET SUMMARY
+            # =================================================
 
             guid_positive_summary = (
                 selected_df
-                .assign(**{
-                    target_column: (
-                        selected_df[target_column].abs()
-                    )
-                })
+                .assign(
+                    **{
+                        target_column: (
+                            selected_df[
+                                target_column
+                            ].abs()
+                        )
+                    }
+                )
                 .groupby(
                     [date_column],
                     as_index=False,
@@ -525,16 +750,37 @@ def get_table_data_data(
                 .sum()
             )
 
-            latest_filtered_df = guid_positive_summary.copy()
+            # =================================================
+            # SAVE LATEST DATA
+            # =================================================
+
+            latest_filtered_df = (
+                guid_positive_summary.copy()
+            )
+
+            # =================================================
+            # SAVE USER-SELECTED COLUMNS
+            # =================================================
+
+            latest_date_column = (
+                date_column
+            )
+
+            latest_target_column = (
+                target_column
+            )
 
             response_extra = {
-                "date_column":   date_column,
+
+                "date_column": date_column,
+
                 "target_column": target_column,
+
             }
 
-        # ========================================================
+        # ====================================================
         # PREVIEW
-        # ========================================================
+        # ====================================================
 
         preview_df = (
             latest_filtered_df
@@ -547,14 +793,18 @@ def get_table_data_data(
             None,
         )
 
-        # ========================================================
+        # ====================================================
         # RESPONSE
-        # ========================================================
+        # ====================================================
 
         return {
-            "table_name":      table_name,
-            "filter_column":   filter_column,
-            "filter_value":    filter_value,
+
+            "table_name": table_name,
+
+            "filter_column": filter_column,
+
+            "filter_value": filter_value,
+
             "filter_values": (
                 [
                     value.strip()
@@ -564,34 +814,58 @@ def get_table_data_data(
                 if filter_value is not None
                 else []
             ),
+
             "use_date_column": use_date_column,
+
             **response_extra,
-            "rows":    len(latest_filtered_df),
-            "columns": latest_filtered_df.columns.tolist(),
-            "data":    preview_df.to_dict(orient="records"),
+
+            "rows": len(
+                latest_filtered_df
+            ),
+
+            "columns": (
+                latest_filtered_df
+                .columns
+                .tolist()
+            ),
+
+            "data": (
+                preview_df
+                .to_dict(
+                    orient="records"
+                )
+            ),
         }
 
     except ValueError as e:
+
         raise HTTPException(
             status_code=404,
             detail=str(e),
         )
 
     except HTTPException:
+
         raise
 
     except Exception as e:
+
         raise HTTPException(
             status_code=500,
             detail=str(e),
         )
 
 
+# ============================================================
+# GET LATEST FILTERED DATA
+# ============================================================
 
 def get_latest_filtered_data_data():
+
     global latest_filtered_df
 
     if latest_filtered_df is None:
+
         raise HTTPException(
             status_code=404,
             detail=(
@@ -608,9 +882,17 @@ def get_latest_filtered_data_data():
     )
 
     return {
+
         "rows": len(df),
-        "columns": df.columns.tolist(),
-        "data": response_df.to_dict(
-            orient="records"
+
+        "columns": (
+            df.columns.tolist()
+        ),
+
+        "data": (
+            response_df
+            .to_dict(
+                orient="records"
+            )
         ),
     }
