@@ -329,7 +329,7 @@ def generate_forecast_output(
     # 9. TRAIN / TEST SPLIT
     # ========================================================
 
-    train_ratio = 0.70
+    train_ratio = 0.80
     initial_train_size = int(len(y) * train_ratio)
 
     # ========================================================
