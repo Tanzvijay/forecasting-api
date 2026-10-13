@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
-
+from forecasting.monthly_tree_models import (
+    generate_monthly_tree_forecasts,
+)
 from typing import Literal
 
 from fastapi import HTTPException
@@ -10,7 +12,7 @@ import repo
 from forecasting.holtwinters import forecast_holt_winters
 from forecasting.holt_linear import forecast_holt_linear
 from forecasting.arima import forecast_arima
-
+from forecasting.tree_models import generate_tree_forecasts
 
 # ============================================================
 # DETECT FREQUENCY FROM DATE
@@ -572,49 +574,139 @@ def generate_forecast_output(
     # 22. BUILD MODELS
     # ========================================================
 
+    
+    # ========================================================
+    # 22. BUILD STATISTICAL MODELS
+    # ========================================================
+
     models = [
         build_model_response(
             "Holt-Winters",
             hw_accuracy,
             hw_wape,
-            hw_future
+            hw_future,
         ),
         build_model_response(
             "Holt Linear",
             holt_linear_accuracy,
             holt_linear_wape,
-            holt_linear_future
+            holt_linear_future,
         ),
         build_model_response(
             "ARIMA",
             arima_accuracy,
             arima_wape,
             arima_future,
-            arima_order
+            arima_order,
         ),
     ]
 
     # ========================================================
-    # 23. SELECT TOP MODEL
+    # 23. ADD XGBOOST, LIGHTGBM AND CATBOOST
     # ========================================================
 
-    valid_models = [m for m in models if m["wape"] is not None]
+    
+# ========================================================
+# ADD TREE MODELS FOR WEEKLY AND MONTHLY FREQUENCIES
+# ========================================================
+
+    if frequency in ("weekly", "monthly"):
+
+        try:
+
+
+            input_df = df.reset_index()[["Date", "Amount"]]
+
+            if frequency == "weekly":
+                tree_output = generate_tree_forecasts(
+                weekly_df=input_df,
+                count=count,
+            )
+            else:
+                tree_output = generate_monthly_tree_forecasts(
+                monthly_df=input_df,
+                count=count,
+            )
+
+            forecast_by_model = {
+            item["model"]: item["forecast"]
+            for item in tree_output.get("forecasts", [])
+        }
+
+            for result in tree_output.get("model_comparison", []):
+                wape_value = result.get("WAPE")
+                accuracy_value = result.get("accuracy")
+
+                model_response = {
+                "model": result["model"],
+                "accuracy": (
+                    None
+                    if accuracy_value is None
+                    else f"{accuracy_value:.2f}%"
+                ),
+                "wape": (
+                    None
+                    if wape_value is None
+                    else f"{wape_value:.2f}%"
+                ),
+                "forecast": forecast_by_model.get(
+                    result["model"], []
+                ),
+                "MAE": result.get("MAE"),
+                "RMSE": result.get("RMSE"),
+            }
+
+                if result.get("error"):
+                    model_response["error"] = result["error"]
+
+                models.append(model_response)
+
+        except Exception as exc:
+        
+            print(f"Tree forecasting error: {exc}")
+
+    # ========================================================
+    # 24. SELECT TOP MODEL
+    # ========================================================
+
+    valid_models = []
+
+    for model in models:
+        wape_value = model.get("wape")
+
+        if wape_value is None:
+            continue
+
+        try:
+            numeric_wape = float(
+                str(wape_value).replace("%", "")
+            )
+
+            if np.isfinite(numeric_wape):
+                valid_models.append(
+                    (numeric_wape, model)
+                )
+
+        except (ValueError, TypeError):
+            continue
 
     if valid_models:
-        top_model = min(
+        _, top_model = min(
             valid_models,
-            key=lambda m: float(m["wape"].replace("%", ""))
+            key=lambda item: item[0],
         )
+
         top_model_name = top_model["model"]
         top_model_wape = top_model["wape"]
         top_model_accuracy = top_model["accuracy"]
+
     else:
         top_model_name = None
         top_model_wape = None
         top_model_accuracy = None
 
     # ========================================================
-    # 24. RETURN RESPONSE
+    # 25. RETURN RESPONSE
     # ========================================================
 
     return {
